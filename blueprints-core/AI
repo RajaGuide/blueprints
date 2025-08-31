@@ -1,0 +1,608 @@
+import streamlit as st
+import pandas as pd
+import json
+import hashlib
+import random
+from datetime import datetime, timedelta
+from typing import Dict, List, Any
+import time
+
+# Simulated import checks
+try:
+    import PyPDF2
+    PDF_AVAILABLE = True
+except ImportError:
+    PDF_AVAILABLE = False
+try:
+    from docx import Document
+    DOCX_AVAILABLE = True
+except ImportError:
+    DOCX_AVAILABLE = False
+try:
+    from pptx import Presentation
+    PPTX_AVAILABLE = True
+except ImportError:
+    PPTX_AVAILABLE = False
+try:
+    import openpyxl
+    EXCEL_AVAILABLE = True
+except ImportError:
+    EXCEL_AVAILABLE = False
+try:
+    from sentence_transformers import SentenceTransformer
+    EMBEDDINGS_AVAILABLE = True
+except ImportError:
+    EMBEDDINGS_AVAILABLE = False
+
+# Session state initialization
+if 'documents' not in st.session_state:
+    st.session_state.documents = []
+if 'drafts' not in st.session_state:
+    st.session_state.drafts = []
+if 'elasticsearch_data' not in st.session_state:
+    st.session_state.elasticsearch_data = []
+if 'contributions' not in st.session_state:
+    st.session_state.contributions = {}
+
+class DocumentProcessor:
+    """Handles document processing for different file formats"""
+    @staticmethod
+    def extract_text_from_pdf(file) -> str:
+        if not PDF_AVAILABLE:
+            return f"PDF processing not available. Simulated content from {file.name}: This is sample PDF content."
+        try:
+            reader = PyPDF2.PdfReader(file)
+            text = ""
+            for page in reader.pages:
+                text += page.extract_text()
+            return text
+        except Exception as e:
+            return f"Error processing PDF: {str(e)}"
+    @staticmethod
+    def extract_text_from_docx(file) -> str:
+        if not DOCX_AVAILABLE:
+            return f"Word processing not available. Simulated content from {file.name}: This is sample Word document content."
+        try:
+            doc = Document(file)
+            text = ""
+            for paragraph in doc.paragraphs:
+                text += paragraph.text + "\n"
+            return text
+        except Exception as e:
+            return f"Error processing Word document: {str(e)}"
+    @staticmethod
+    def extract_text_from_pptx(file) -> str:
+        if not PPTX_AVAILABLE:
+            return f"PowerPoint processing not available. Simulated content from {file.name}: This is sample PowerPoint content."
+        try:
+            prs = Presentation(file)
+            text = ""
+            for slide in prs.slides:
+                for shape in slide.shapes:
+                    if hasattr(shape, "text"):
+                        text += shape.text + "\n"
+            return text
+        except Exception as e:
+            return f"Error processing PowerPoint: {str(e)}"
+    @staticmethod
+    def extract_text_from_excel(file) -> str:
+        if not EXCEL_AVAILABLE:
+            return f"Excel processing not available. Simulated content from {file.name}: This is sample Excel data."
+        try:
+            workbook = openpyxl.load_workbook(file)
+            text = ""
+            for sheet_name in workbook.sheetnames:
+                sheet = workbook[sheet_name]
+                text += f"Sheet: {sheet_name}\n"
+                for row in sheet.iter_rows(values_only=True):
+                    text += " | ".join([str(cell) if cell is not None else "" for cell in row]) + "\n"
+            return text
+        except Exception as e:
+            return f"Error processing Excel file: {str(e)}"
+
+class ElasticsearchSimulator:
+    """Simulates Elasticsearch functionality for vector storage"""
+    def __init__(self):
+        self.index_name = "board_documents"
+        if EMBEDDINGS_AVAILABLE:
+            try:
+                self.model = SentenceTransformer('all-MiniLM-L6-v2')
+            except:
+                self.model = None
+        else:
+            self.model = None
+    def index_document(self, doc_id: str, content: str, metadata: Dict) -> Dict:
+        if self.model:
+            try:
+                embedding = self.model.encode(content).tolist()
+            except:
+                embedding = [random.random() for _ in range(384)]
+        else:
+            embedding = [random.random() for _ in range(384)]
+        doc = {
+            'id': doc_id,
+            'content': content,
+            'embedding': embedding,
+            'metadata': metadata,
+            'indexed_at': datetime.now().isoformat()
+        }
+        st.session_state.elasticsearch_data.append(doc)
+        return {'result': 'created', 'id': doc_id}
+    def search(self, query: str, size: int = 10) -> List[Dict]:
+        if not st.session_state.elasticsearch_data:
+            return []
+        results = []
+        for doc in st.session_state.elasticsearch_data:
+            score = random.uniform(0.5, 1.0)
+            if any(word.lower() in doc['content'].lower() for word in query.split()):
+                score += 0.3
+            results.append({
+                'score': score,
+                'source': doc,
+                'highlight': self._extract_highlight(doc['content'], query)
+            })
+        results.sort(key=lambda x: x['score'], reverse=True)
+        return results[:size]
+    def _extract_highlight(self, content: str, query: str) -> str:
+        words = query.split()
+        sentences = content.split('.')
+        relevant_sentences = []
+        for sentence in sentences[:3]:
+            if any(word.lower() in sentence.lower() for word in words):
+                relevant_sentences.append(sentence.strip())
+        return '. '.join(relevant_sentences) if relevant_sentences else content[:200]
+
+class DraftManager:
+    """Manages draft creation and organization"""
+    @staticmethod
+    def suggest_sections(theme: str) -> List[str]:
+        section_templates = {
+            'business strategy': ['Executive Summary', 'Market Analysis', 'Strategic Objectives', 'Implementation Plan', 'Risk Assessment', 'Financial Projections'],
+            'project proposal': ['Project Overview', 'Objectives', 'Scope', 'Timeline', 'Resources', 'Budget', 'Risk Management'],
+            'quarterly review': ['Performance Summary', 'Key Achievements', 'Challenges', 'Metrics Analysis', 'Next Quarter Goals', 'Action Items'],
+            'board meeting': ['Opening Remarks', 'Financial Report', 'Operational Updates', 'Strategic Initiatives', 'Risk & Compliance', 'Next Steps'],
+            'default': ['Introduction', 'Main Content', 'Analysis', 'Recommendations', 'Conclusion', 'Next Steps']
+        }
+        theme_lower = theme.lower()
+        for key, sections in section_templates.items():
+            if key in theme_lower or any(word in theme_lower for word in key.split()):
+                return sections
+        return section_templates['default']
+    @staticmethod
+    def generate_content_for_section(section: str, theme: str, search_results: List[Dict]) -> str:
+        if not search_results:
+            return f"[Placeholder content for {section}]\n\nThis section will contain relevant information about {theme} once documents are processed and analyzed."
+        content = f"# {section}\n\n"
+        for i, result in enumerate(search_results[:2]):
+            highlight = result.get('highlight', '')
+            if highlight:
+                content += f"**Key Point {i+1}:** {highlight}\n\n"
+        content += f"Based on the available information, this section addresses key aspects of {theme} "
+        content += f"relevant to {section.lower()}. The analysis draws from multiple sources to provide "
+        content += f"comprehensive insights and actionable recommendations.\n\n"
+        return content
+
+class CollaborationManager:
+    """Manages collaboration features and contributions"""
+    @staticmethod
+    def add_contribution(draft_id: str, section: str, contributor: str, contribution: str, contribution_type: str = "edit"):
+        if draft_id not in st.session_state.contributions:
+            st.session_state.contributions[draft_id] = {}
+        if section not in st.session_state.contributions[draft_id]:
+            st.session_state.contributions[draft_id][section] = []
+        contribution_data = {
+            'id': hashlib.md5(f"{contributor}{contribution}{datetime.now()}".encode()).hexdigest()[:8],
+            'contributor': contributor,
+            'contribution': contribution,
+            'type': contribution_type,
+            'timestamp': datetime.now(),
+            'status': 'pending'
+        }
+        st.session_state.contributions[draft_id][section].append(contribution_data)
+    @staticmethod
+    def update_contribution_status(draft_id: str, section: str, contribution_id: str, status: str):
+        if draft_id in st.session_state.contributions and section in st.session_state.contributions[draft_id]:
+            for contrib in st.session_state.contributions[draft_id][section]:
+                if contrib['id'] == contribution_id:
+                    contrib['status'] = status
+                    break
+
+def process_uploaded_file(uploaded_file) -> Dict[str, Any]:
+    file_extension = uploaded_file.name.split('.')[-1].lower()
+    processor = DocumentProcessor()
+    if file_extension == 'pdf':
+        content = processor.extract_text_from_pdf(uploaded_file)
+    elif file_extension == 'docx':
+        content = processor.extract_text_from_docx(uploaded_file)
+    elif file_extension == 'pptx':
+        content = processor.extract_text_from_pptx(uploaded_file)
+    elif file_extension in ['xlsx', 'xls']:
+        content = processor.extract_text_from_excel(uploaded_file)
+    else:
+        content = f"Unsupported file format: {file_extension}"
+    return {
+        'filename': uploaded_file.name,
+        'content': content,
+        'file_type': file_extension,
+        'size': uploaded_file.size,
+        'uploaded_at': datetime.now()
+    }
+
+def generate_sample_data():
+    sample_docs = [
+        {
+            'filename': 'Q3_Financial_Report.pdf',
+            'content': 'Q3 Financial Performance: Revenue increased by 15% compared to Q2. Operating expenses remained stable at $2.3M. Net profit margin improved to 12.5%.',
+            'file_type': 'pdf',
+            'size': 245760,
+            'uploaded_at': datetime.now() - timedelta(days=5)
+        },
+        {
+            'filename': 'Strategic_Plan_2024.docx',
+            'content': 'Strategic Objectives for 2024: Expand market presence in emerging markets. Invest in digital transformation initiatives.',
+            'file_type': 'docx',
+            'size': 156432,
+            'uploaded_at': datetime.now() - timedelta(days=3)
+        },
+        {
+            'filename': 'Market_Analysis_Presentation.pptx',
+            'content': 'Market Analysis Summary: Current market size: $1.2B. Growth rate: 8.5% annually.',
+            'file_type': 'pptx',
+            'size': 987654,
+            'uploaded_at': datetime.now() - timedelta(days=2)
+        }
+    ]
+    if not st.session_state.documents:
+        st.session_state.documents.extend(sample_docs)
+        es = ElasticsearchSimulator()
+        for doc in sample_docs:
+            doc_id = hashlib.md5(doc['filename'].encode()).hexdigest()
+            es.index_document(doc_id, doc['content'], {
+                'filename': doc['filename'],
+                'file_type': doc['file_type']
+            })
+
+def main():
+    st.set_page_config(
+        page_title="Board Drafting Application",
+        page_icon="=�",
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
+    st.title("=� Board Drafting Application")
+    st.markdown("*Streamlined document management and collaborative drafting platform*")
+    generate_sample_data()
+    st.sidebar.title("Navigation")
+    page = st.sidebar.selectbox(
+        "Select Function",
+        ["Data Ingestion", "Storage Management", "Draft Creation", "Collaboration", "Summarization"]
+    )
+    if page == "Data Ingestion":
+        show_data_ingestion()
+    elif page == "Storage Management":
+        show_storage_management()
+    elif page == "Draft Creation":
+        show_draft_creation_merged()
+    elif page == "Collaboration":
+        show_collaboration()
+    elif page == "Summarization":
+        show_summarization()
+
+def show_data_ingestion():
+    st.header("=� Data Ingestion")
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        st.subheader("Upload Documents")
+        uploaded_files = st.file_uploader(
+            "Choose files",
+            type=['pdf', 'docx', 'pptx', 'xlsx', 'xls'],
+            accept_multiple_files=True
+        )
+        if uploaded_files:
+            if st.button("Process Files", type="primary"):
+                process_files(uploaded_files)
+    with col2:
+        st.subheader("Processing Status")
+        if st.session_state.documents:
+            st.success(f" {len(st.session_state.documents)} documents processed")
+        else:
+            st.info("9 No documents uploaded yet")
+        st.subheader("Available Processors")
+        processors = {
+            "PDF": PDF_AVAILABLE,
+            "Word": DOCX_AVAILABLE, 
+            "PowerPoint": PPTX_AVAILABLE,
+            "Excel": EXCEL_AVAILABLE,
+            "Embeddings": EMBEDDINGS_AVAILABLE
+        }
+        for processor, available in processors.items():
+            status = "" if available else "� (Simulated)"
+            st.write(f"{status} {processor}")
+    if st.session_state.documents:
+        st.subheader("Processed Documents")
+        df = pd.DataFrame(st.session_state.documents)
+        df['uploaded_at'] = pd.to_datetime(df['uploaded_at']).dt.strftime('%Y-%m-%d %H:%M')
+        st.dataframe(df[['filename', 'file_type', 'size', 'uploaded_at']], use_container_width=True)
+
+def process_files(uploaded_files):
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    es = ElasticsearchSimulator()
+    for i, uploaded_file in enumerate(uploaded_files):
+        status_text.text(f"Processing {uploaded_file.name}...")
+        doc_data = process_uploaded_file(uploaded_file)
+        st.session_state.documents.append(doc_data)
+        doc_id = hashlib.md5(uploaded_file.name.encode()).hexdigest()
+        es.index_document(doc_id, doc_data['content'], {
+            'filename': doc_data['filename'],
+            'file_type': doc_data['file_type']
+        })
+        progress_bar.progress((i + 1) / len(uploaded_files))
+        time.sleep(0.5)  # Simulate processing time
+    status_text.text(" All files processed successfully!")
+    time.sleep(1)
+    status_text.empty()
+    progress_bar.empty()
+
+def show_storage_management():
+    st.header("=� Storage Management")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("Elasticsearch Index Status")
+        if st.session_state.elasticsearch_data:
+            st.success(f"{len(st.session_state.elasticsearch_data)} documents indexed")
+            df = pd.DataFrame([
+                {'Metric': 'Total Documents', 'Value': len(st.session_state.elasticsearch_data)},
+                {'Metric': 'PDF Files', 'Value': sum(1 for doc in st.session_state.elasticsearch_data if doc['metadata'].get('file_type') == 'pdf')},
+                {'Metric': 'Word Files', 'Value': sum(1 for doc in st.session_state.elasticsearch_data if doc['metadata'].get('file_type') == 'docx')},
+                {'Metric': 'PowerPoint Files', 'Value': sum(1 for doc in st.session_state.elasticsearch_data if doc['metadata'].get('file_type') == 'pptx')},
+                {'Metric': 'Excel Files', 'Value': sum(1 for doc in st.session_state.elasticsearch_data if doc['metadata'].get('file_type') in ['xlsx', 'xls'])}
+            ])
+            st.dataframe(df, use_container_width=True)
+        else:
+            st.warning("� No documents in index")
+    with col2:
+        st.subheader("Search Test")
+        search_query = st.text_input("Test search query", placeholder="e.g., financial performance")
+        if search_query and st.button("Search"):
+            es = ElasticsearchSimulator()
+            results = es.search(search_query)
+            if results:
+                st.write(f"Found {len(results)} results:")
+                for result in results[:3]:
+                    with st.expander(f"Score: {result['score']:.2f} - {result['source']['metadata']['filename']}"):
+                        st.write(result['highlight'])
+            else:
+                st.info("No results found")
+    st.subheader("Document Management")
+    if st.session_state.elasticsearch_data:
+        for doc in st.session_state.elasticsearch_data:
+            with st.expander(f"{doc['metadata']['filename']}"):
+                st.write(f"**Type:** {doc['metadata']['file_type'].upper()}")
+                st.write(f"**Indexed:** {doc['indexed_at']}")
+                st.write(f"**Content Preview:** {doc['content'][:200]}...")
+                if st.button(f"Remove {doc['id'][:8]}", key=f"remove_{doc['id']}"):
+                    st.session_state.elasticsearch_data.remove(doc)
+                    st.experimental_rerun()
+
+def show_draft_creation_merged():
+    st.header("Draft Creation & Editing")
+    # Removed draft title input
+    draft_theme = st.text_input("Draft Theme", placeholder="e.g., quarterly review, business strategy")
+    selected_sections = []
+    if draft_theme:
+        suggested_sections = DraftManager.suggest_sections(draft_theme)
+        st.write("**Suggested Sections:**")
+        col_a, col_b = st.columns(2)
+        for i, section in enumerate(suggested_sections):
+            with col_a if i % 2 == 0 else col_b:
+                if st.checkbox(section, value=True, key=f"section_{section}"):
+                    selected_sections.append(section)
+        custom_sections = st.text_area("Additional Custom Sections (one per line)")
+        if custom_sections:
+            selected_sections.extend([s.strip() for s in custom_sections.split('\n') if s.strip()])
+    if st.button("Create Draft", type="primary", disabled=not (draft_theme and selected_sections)):
+        create_draft(None, draft_theme, selected_sections)
+    st.subheader("Existing Drafts")
+    if st.session_state.drafts:
+        for draft in st.session_state.drafts:
+            display_title = draft.get('title') or f"Draft - {draft.get('theme', 'Untitled')}"
+            with st.expander(f"{display_title}"):
+                st.write(f"**Theme:** {draft['theme']}")
+                st.write(f"**Sections:** {len(draft['sections'])}")
+                st.write(f"**Created:** {draft['created_at'].strftime('%Y-%m-%d %H:%M')}")
+                for section_name, section_data in draft['sections'].items():
+                    with st.expander(f"Section: {section_name}"):
+                        st.markdown(section_data['content'])
+                        draft_id = draft['id']
+                        if (draft_id in st.session_state.contributions and
+                            section_name in st.session_state.contributions[draft_id]):
+                            accepted_contribs = [
+                                c for c in st.session_state.contributions[draft_id][section_name]
+                                if c['status'] == 'accepted'
+                            ]
+                            if accepted_contribs:
+                                st.write("**Accepted Contributions:**")
+                                for contrib in accepted_contribs:
+                                    st.info(f"=� {contrib['contributor']}: {contrib['contribution']}")
+    else:
+        st.info("No drafts created yet")
+
+def create_draft(title: str, theme: str, sections: List[str]):
+    if not title or not title.strip():
+        title = f"Draft: {theme.title()} - {datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    draft_id = hashlib.md5(f"{title}{theme}{datetime.now()}".encode()).hexdigest()
+    es = ElasticsearchSimulator()
+    search_results = es.search(theme, size=10)
+    draft_sections = {}
+    for section in sections:
+        section_content = DraftManager.generate_content_for_section(section, theme, search_results)
+        draft_sections[section] = {
+            'content': section_content,
+            'last_modified': datetime.now(),
+            'contributors': []
+        }
+    draft = {
+        'id': draft_id,
+        'title': title,
+        'theme': theme,
+        'sections': draft_sections,
+        'created_at': datetime.now(),
+        'status': 'draft'
+    }
+    st.session_state.drafts.append(draft)
+    st.success(f" Draft '{title}' created successfully with {len(sections)} sections!")
+    contributors = ['John Smith', 'Sarah Johnson', 'Mike Chen', 'Lisa Williams']
+    for section in sections[:2]:
+        contributor = random.choice(contributors)
+        contribution = f"Suggested improvement for {section}: Consider adding more detailed analysis."
+        CollaborationManager.add_contribution(draft_id, section, contributor, contribution)
+
+def show_collaboration():
+    st.header("> Collaboration")
+    if not st.session_state.drafts:
+        st.info("No drafts available. Please create a draft first.")
+        return
+    draft_titles = []
+    for draft in st.session_state.drafts:
+        title = draft.get('title') or f"Draft - {draft.get('theme', 'Untitled')}"
+        draft_titles.append(f"{title} ({draft['theme']})")
+
+    selected_draft_idx = st.selectbox("Select Draft", range(len(draft_titles)), format_func=lambda x: draft_titles[x])
+    if selected_draft_idx is not None:
+        current_draft = st.session_state.drafts[selected_draft_idx]
+        display_title = current_draft.get('title') or f"Draft - {current_draft.get('theme', 'Untitled')}"
+        draft_id = current_draft['id']
+        st.subheader(f"Collaborating on: {display_title}")
+        with st.expander("� Add New Contribution"):
+            col1, col2 = st.columns(2)
+            with col1:
+                contributor_name = st.text_input("Your Name", value="Current User")
+                section_for_contrib = st.selectbox("Section", list(current_draft['sections'].keys()))
+            with col2:
+                contribution_type = st.selectbox("Contribution Type", ["edit", "comment", "suggestion"])
+                contribution_text = st.text_area("Your Contribution")
+            if st.button("Add Contribution") and contribution_text:
+                CollaborationManager.add_contribution(draft_id, section_for_contrib, contributor_name, contribution_text, contribution_type)
+                st.success("Contribution added!")
+                st.experimental_rerun()
+        for section_name in current_draft['sections'].keys():
+            st.subheader(f"Section: {section_name}")
+            if draft_id in st.session_state.contributions and section_name in st.session_state.contributions[draft_id]:
+                contributions = st.session_state.contributions[draft_id][section_name]
+                for contrib in contributions:
+                    status_color = {"pending": "=�", "accepted": "=�", "rejected": "=4"}
+                    col1, col2, col3, col4 = st.columns([3,1,1,1])
+                    with col1:
+                        st.write(f"**{contrib['contributor']}** ({contrib['type']})")
+                        st.write(contrib['contribution'])
+                        st.caption(f"Submitted: {contrib['timestamp'].strftime('%Y-%m-%d %H:%M')}")
+                    with col2:
+                        st.write(f"{status_color.get(contrib['status'], '�')} {contrib['status'].title()}")
+                    with col3:
+                        if contrib['status'] == 'pending' and st.button("Accept", key=f"accept_{contrib['id']}"):
+                            CollaborationManager.update_contribution_status(draft_id, section_name, contrib['id'], 'accepted')
+                            st.experimental_rerun()
+                    with col4:
+                        if contrib['status'] == 'pending' and st.button("Reject", key=f"reject_{contrib['id']}"):
+                            CollaborationManager.update_contribution_status(draft_id, section_name, contrib['id'], 'rejected')
+                            st.experimental_rerun()
+                    st.divider()
+            else:
+                st.info("No contributions yet for this section")
+
+def show_summarization():
+    st.header("=� Summarization")
+    if not st.session_state.drafts:
+        st.info("No drafts available for summarization. Please create a draft first.")
+        return
+    draft_titles = []
+    for draft in st.session_state.drafts:
+        title = draft.get('title') or f"Draft - {draft.get('theme', 'Untitled')}"
+        draft_titles.append(f"{title} ({draft['theme']})")
+
+    selected_draft_idx = st.selectbox("Select Draft to Summarize", range(len(draft_titles)), format_func=lambda x: draft_titles[x])
+    if selected_draft_idx is not None:
+        current_draft = st.session_state.drafts[selected_draft_idx]
+        display_title = current_draft.get('title') or f"Draft - {current_draft.get('theme', 'Untitled')}"
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("Summary Options")
+            summary_type = st.radio("Summary Type", ["Concise", "Detailed"])
+            include_contributions = st.checkbox("Include Accepted Contributions", value=True)
+            sections_to_summarize = st.multiselect(
+                "Sections to Include",
+                list(current_draft['sections'].keys()),
+                default=list(current_draft['sections'].keys())
+            )
+            if st.button("Generate Summary", type="primary"):
+                generate_summary(current_draft, summary_type, include_contributions, sections_to_summarize)
+        with col2:
+            st.subheader("Draft Overview")
+            st.write(f"**Title:** {display_title}")
+            st.write(f"**Theme:** {current_draft['theme']}")
+            st.write(f"**Sections:** {len(current_draft['sections'])}")
+            st.write(f"**Created:** {current_draft['created_at'].strftime('%Y-%m-%d %H:%M')}")
+            draft_id = current_draft['id']
+            if draft_id in st.session_state.contributions:
+                total_contribs = sum(len(contribs) for contribs in st.session_state.contributions[draft_id].values())
+                accepted_contribs = sum(
+                    len([c for c in contribs if c['status'] == 'accepted'])
+                    for contribs in st.session_state.contributions[draft_id].values()
+                )
+                st.write(f"**Contributions:** {accepted_contribs}/{total_contribs} accepted")
+
+def generate_summary(draft: Dict, summary_type: str, include_contributions: bool, sections: List[str]):
+    st.subheader(f"{summary_type} Summary")
+    summary_content = f"# {draft.get('title') or f'''Draft - {draft.get('theme', 'Untitled')}'''}\n\n"
+    summary_content += f"**Theme:** {draft['theme']}\n"
+    summary_content += f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
+    if summary_type == "Concise":
+        summary_content += "## Executive Summary\n\n"
+        summary_content += f"This {draft['theme']} document covers {len(sections)} key areas: "
+        summary_content += ", ".join(sections) + ". "
+        key_points = []
+        for section in sections:
+            if section in draft['sections']:
+                content = draft['sections'][section]['content']
+                sentences = content.split('. ')
+                if len(sentences) > 1:
+                    key_points.append(sentences[1][:100] + "...")
+        if key_points:
+            summary_content += "Key highlights include: " + " ".join(key_points[:3])
+        if include_contributions:
+            draft_id = draft['id']
+            if draft_id in st.session_state.contributions:
+                accepted_count = sum(
+                    len([c for c in contribs if c['status'] == 'accepted'])
+                    for contribs in st.session_state.contributions[draft_id].values()
+                )
+                if accepted_count > 0:
+                    summary_content += f"\n\nThis summary incorporates {accepted_count} accepted collaborative contributions."
+    else:
+        for section in sections:
+            if section in draft['sections']:
+                summary_content += f"## {section}\n\n"
+                content = draft['sections'][section]['content']
+                summary_content += content + "\n\n"
+                if include_contributions:
+                    draft_id = draft['id']
+                    if (draft_id in st.session_state.contributions and 
+                        section in st.session_state.contributions[draft_id]):
+                        accepted_contribs = [c for c in st.session_state.contributions[draft_id][section] 
+                                           if c['status'] == 'accepted']
+                        if accepted_contribs:
+                            summary_content += "### Collaborative Contributions:\n\n"
+                            for contrib in accepted_contribs:
+                                summary_content += f"- **{contrib['contributor']}:** {contrib['contribution']}\n"
+                            summary_content += "\n"
+    st.markdown(summary_content)
+    st.download_button(
+        "Download Summary",
+        data=summary_content,
+        file_name=f"{draft.get('title') or 'Draft'}_summary_{summary_type.lower()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md",
+        mime="text/markdown"
+    )
+
+if __name__ == "__main__":
+    main()
